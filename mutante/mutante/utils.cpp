@@ -1,138 +1,175 @@
 #include <ntifs.h>
-#include <windef.h>
-#include <ntimage.h>
-#include "shared.h"
+#include "log.h"
 #include "utils.h"
+#include "shared.h"
+#include "smbios.h"
+
+#define VENDOR "BESSTAR TECH LIMITED\0"
+#define MANUFACTURER "BESSTAR TECH LIMITED\0"
+#define PRODUCT_NAME "B450I GAMING PLUS MAX WIFI (MS-7A40)\0"
+#define SERIAL_NUMBER "Default string\0"
 
 /**
- * \brief Get base address of kernel module
- * \param moduleName Name of the module (ex. storport.sys)
- * \return Address of the module or null pointer if failed
+ * \brief Get's the string from SMBIOS table
+ * \param header Table header
+ * \param string String itself
+ * \return Pointer to the null terminated string
  */
-PVOID Utils::GetModuleBase(const char* moduleName)
+char* Smbios::GetString(SMBIOS_HEADER* header, SMBIOS_STRING string)
 {
-	PVOID address = nullptr;
-	ULONG size = 0;
-	
-	auto status = ZwQuerySystemInformation(SystemModuleInformation, &size, 0, &size);
-	if (status != STATUS_INFO_LENGTH_MISMATCH)
-		return nullptr;
+  const auto* start = reinterpret_cast<const char*>(header) + header->Length;
 
-	auto* moduleList = static_cast<PSYSTEM_MODULE_INFORMATION>(ExAllocatePoolWithTag(NonPagedPool, size, POOL_TAG));
-	if (!moduleList)
-		return nullptr;
+  if (!string || *start == 0)
+    return nullptr;
 
-	status = ZwQuerySystemInformation(SystemModuleInformation, moduleList, size, nullptr);
-	if (!NT_SUCCESS(status))
-		goto end;
+  while (--string)
+  {
+    start += strlen(start) + 1;
+  }
 
-	for (ULONG i = 0; i < moduleList->ulModuleCount; i++)
-	{
-		auto module = moduleList->Modules[i];
-		if (strstr(module.ImageName, moduleName))
-		{
-			address = module.Base;
-			break;
-		}
-	}
-	
-end:
-	ExFreePool(moduleList);
-	return address;
+  return const_cast<char*>(start);
 }
 
-
 /**
- * \brief Checks if buffer at the location of base parameter
- * matches pattern and mask
- * \param base Address to check
- * \param pattern Byte pattern to match
- * \param mask Mask containing unknown bytes
+ * \brief Modify information in the table of given header
+ * \param header Table header (only 0-3 implemented)
  * \return 
  */
-bool Utils::CheckMask(const char* base, const char* pattern, const char* mask)
+NTSTATUS Smbios::ProcessTable(SMBIOS_HEADER* header)
 {
-	for (; *mask; ++base, ++pattern, ++mask) 
-	{
-		if ('x' == *mask && *base != *pattern) 
-		{
-			return false;
-		}
-	}
+  if (!header->Length)
+    return STATUS_UNSUCCESSFUL;
 
-	return true;
+  if (header->Type == 0)
+  {
+    auto* type0 = reinterpret_cast<SMBIOS_TYPE0*>(header);
+
+    auto* vendor = GetString(header, type0->Vendor);
+    memcpy(vendor, VENDOR, strlen(VENDOR) + 1);
+  }
+
+  if (header->Type == 1)
+  {
+    auto* type1 = reinterpret_cast<SMBIOS_TYPE1*>(header);
+
+    auto* manufacturer = GetString(header, type1->Manufacturer);
+    memcpy(manufacturer, MANUFACTURER, strlen(MANUFACTURER) + 1);
+
+    auto* productName = GetString(header, type1->ProductName);
+    memcpy(productName, PRODUCT_NAME, strlen(PRODUCT_NAME) + 1);
+
+    auto* serialNumber = GetString(header, type1->SerialNumber);
+    memcpy(serialNumber, SERIAL_NUMBER, strlen(SERIAL_NUMBER) + 1);
+  }
+
+  if (header->Type == 2)
+  {
+    auto* type2 = reinterpret_cast<SMBIOS_TYPE2*>(header);
+
+    auto* manufacturer = GetString(header, type2->Manufacturer);
+    memcpy(manufacturer, MANUFACTURER, strlen(MANUFACTURER) + 1);
+
+    auto* productName = GetString(header, type2->ProductName);
+    memcpy(productName, PRODUCT_NAME, strlen(PRODUCT_NAME) + 1);
+
+    auto* serialNumber = GetString(header, type2->SerialNumber);
+    memcpy(serialNumber, SERIAL_NUMBER, strlen(SERIAL_NUMBER) + 1);
+  }
+
+  if (header->Type == 3)
+  {
+    auto* type3 = reinterpret_cast<SMBIOS_TYPE3*>(header);
+
+    auto* manufacturer = GetString(header, type3->Manufacturer);
+    memcpy(manufacturer, MANUFACTURER, strlen(MANUFACTURER) + 1);
+
+    auto* serialNumber = GetString(header, type3->SerialNumber);
+    memcpy(serialNumber, SERIAL_NUMBER, strlen(SERIAL_NUMBER) + 1);
+  }
+  
+  return STATUS_SUCCESS;
 }
 
 /**
- * \brief Find byte pattern in given buffer
- * \param base Address to start searching in
- * \param length Maximum length
- * \param pattern Byte pattern to match
- * \param mask Mask containing unknown bytes
- * \return Pointer to matching memory
+ * \brief Loop through SMBIOS tables with provided first table header
+ * \param mapped Header of the first table
+ * \param size Size of all tables including strings
+ * \return 
  */
-PVOID Utils::FindPattern(PVOID base, int length, const char* pattern, const char* mask)
+NTSTATUS Smbios::LoopTables(void* mapped, ULONG size)
 {
-	length -= static_cast<int>(strlen(mask));
-	for (auto i = 0; i <= length; ++i) 
-	{
-		const auto* data = static_cast<char*>(base);
-		const auto* address = &data[i];
-		if (CheckMask(address, pattern, mask))
-			return PVOID(address);
-	}
+  auto* endAddress = static_cast<char*>(mapped) + size;
+  while (true)
+  {
+    auto* header = static_cast<SMBIOS_HEADER*>(mapped);
+    if (header->Type == 127 && header->Length == 4)
+      break;
+    
+    ProcessTable(header);
+    auto* end = static_cast<char*>(mapped) + header->Length;
+    while (0 != (*end | *(end + 1))) end++;
+    end += 2;
+    if (end >= endAddress)
+      break;  
 
-	return nullptr;
+    mapped = end;
+  }
+  
+  return STATUS_SUCCESS;
 }
 
 /**
- * \brief Find byte pattern in given module/image ".text" and "PAGE" sections
- * \param base Base address of the kernel module
- * \param pattern Byte pattern to match
- * \param mask Mask containing unknown bytes
- * \return Pointer to matching memory
+ * \brief Find SMBIOS physical address, map it and then loop through
+ * table 0-3 and modify possible identifiable information
+ * \return Status of the change (will return STATUS_SUCCESS if mapping was successful)
  */
-PVOID Utils::FindPatternImage(PVOID base, const char* pattern, const char* mask)
+NTSTATUS Smbios::ChangeSmbiosSerials()
 {
-	PVOID match = nullptr;
+  auto* base = Utils::GetModuleBase("ntoskrnl.exe");
+  if (!base)
+  {
+    Log::Print("Failed to find ntoskrnl.sys base!\n");
+    return STATUS_UNSUCCESSFUL;
+  }
 
-	auto* headers = reinterpret_cast<PIMAGE_NT_HEADERS>(static_cast<char*>(base) + static_cast<PIMAGE_DOS_HEADER>(base)->e_lfanew);
-	auto* sections = IMAGE_FIRST_SECTION(headers);
-	
-	for (auto i = 0; i < headers->FileHeader.NumberOfSections; ++i) 
-	{
-		auto* section = &sections[i];
-		if ('EGAP' == *reinterpret_cast<PINT>(section->Name) || memcmp(section->Name, ".text", 5) == 0) 
-		{
-			match = FindPattern(static_cast<char*>(base) + section->VirtualAddress, section->Misc.VirtualSize, pattern, mask);
-			if (match) 
-				break;
-		}
-	}
+  auto* physicalAddress = static_cast<PPHYSICAL_ADDRESS>(Utils::FindPatternImage(base, "\x48\x8B\x0D\x00\x00\x00\x00\x48\x85\xC9\x74\x00\x8B\x15", "xxx????xxxx?xx")); // WmipFindSMBiosStructure -> WmipSMBiosTablePhysicalAddress
+  if (!physicalAddress)
+  {
+    Log::Print("Failed to find SMBIOS physical address!\n");
+    return STATUS_UNSUCCESSFUL;
+  }
 
-	return match;
-}
+  physicalAddress = reinterpret_cast<PPHYSICAL_ADDRESS>(reinterpret_cast<char*>(physicalAddress) + 7 + *reinterpret_cast<int*>(reinterpret_cast<char*>(physicalAddress) + 3));
+  if (!physicalAddress)
+  {
+    Log::Print("Physical address is null!\n");
+    return STATUS_UNSUCCESSFUL;
+  }
 
-/**
- * \brief Generate pseudo-random text into given buffer
- * \param text Pointer to text
- * \param length Desired length
- */
-void Utils::RandomText(char* text, const int length)
-{
-	if (!text)
-		return;
+  auto* sizeScan = Utils::FindPatternImage(base, "\x8B\x1D\x00\x00\x00\x00\x48\x8B\xD0\x44\x8B\xC3\x48\x8B\xCD\xE8\x00\x00\x00\x00\x8B\xD3\x48\x8B", "xx????xxxxxxxxxx????xxxx");  // WmipFindSMBiosStructure -> WmipSMBiosTableLength
+  if (!sizeScan)
+  {
+    Log::Print("Failed to find SMBIOS size!\n");
+    return STATUS_UNSUCCESSFUL;
+  }
 
-	static const char alphanum[] =
-		"0123456789"
-		"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-		"abcdefghijklmnopqrstuvwxyz";
+  const auto size = *reinterpret_cast<ULONG*>(static_cast<char*>(sizeScan) + 6 + *reinterpret_cast<int*>(static_cast<char*>(sizeScan) + 2));
+  if (!size)
+  {
+    Log::Print("SMBIOS size is null!\n");
+    return STATUS_UNSUCCESSFUL;
+  }
 
-	auto seed = KeQueryTimeIncrement();
-
-	for (auto n = 0; n <= length; n++)
-	{
-		auto key = RtlRandomEx(&seed) % static_cast<int>(sizeof(alphanum) - 1);
-		text[n] = alphanum[key];
-	}
+  auto* mapped = MmMapIoSpace(*physicalAddress, size, MmNonCached);
+  if (!mapped)
+  {
+    Log::Print("Failed to map SMBIOS structures!\n");
+    return STATUS_UNSUCCESSFUL;
+  }
+  
+  LoopTables(mapped, size);
+  
+  MmUnmapIoSpace(mapped, size);
+  
+  return STATUS_SUCCESS;
 }
