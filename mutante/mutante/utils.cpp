@@ -26,7 +26,7 @@ PVOID Utils::GetModuleBase(const char* moduleName)
 	if (!NT_SUCCESS(status))
 		goto end;
 
-	for (auto i = 0; i < moduleList->ulModuleCount; i++)
+	for (ULONG i = 0; i < moduleList->ulModuleCount; i++)
 	{
 		auto module = moduleList->Modules[i];
 		if (strstr(module.ImageName, moduleName))
